@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace SurfaceKuwahara
@@ -11,12 +12,26 @@ namespace SurfaceKuwahara
             Disc
         }
 
+        [System.Serializable]
+        public class SurfaceSample
+        {
+            public Vector3 localPosition;
+            public Vector3 worldPosition;
+            public Vector3 localNormal;
+            public Vector3 worldNormal;
+            public Vector2 uv;
+            public Color baseColor;
+            public Color filteredColor;
+            public GameObject markerObject;
+        }
+
         [SerializeField] private int sampleCount = 256;
         [SerializeField] private int randomSeed = 12345;
         [SerializeField] private float pointSize = 0.05f;
         [SerializeField] private float surfaceOffset = 0.001f;
         [SerializeField] private MarkerShape markerShape = MarkerShape.Sphere;
         [SerializeField] private Material markerMaterial;
+        [SerializeField] private List<SurfaceSample> samples = new List<SurfaceSample>();
 
         private const string MarkerContainerName = "Surface Point Samples";
         private const int DiscSegmentCount = 16;
@@ -37,6 +52,8 @@ namespace SurfaceKuwahara
 
             Vector3[] vertices = mesh.vertices;
             int[] triangles = mesh.triangles;
+            Vector3[] normals = mesh.normals;
+            Vector2[] uvs = mesh.uv;
 
             if (vertices == null || vertices.Length == 0 || triangles == null || triangles.Length < 3)
             {
@@ -44,7 +61,6 @@ namespace SurfaceKuwahara
                 return;
             }
 
-            Transform container = CreateMarkerContainer();
             float[] cumulativeTriangleAreas = BuildCumulativeTriangleAreas(vertices, triangles, out float totalArea);
 
             if (totalArea <= Mathf.Epsilon)
@@ -58,17 +74,30 @@ namespace SurfaceKuwahara
             for (int i = 0; i < sampleCount; i++)
             {
                 int triangleIndex = PickTriangleWeightedByArea(cumulativeTriangleAreas, totalArea);
-                Vector3 localPoint = SamplePointOnTriangle(vertices, triangles, triangleIndex);
-                Vector3 localNormal = CalculateTriangleNormal(vertices, triangles, triangleIndex);
-                Vector3 worldPoint = transform.TransformPoint(localPoint);
-                Vector3 worldNormal = TransformNormalToWorld(localNormal);
+                samples.Add(CreateSurfaceSample(vertices, triangles, normals, uvs, triangleIndex));
+            }
 
-                CreateMarker(container, worldPoint, worldNormal, i);
+            AssignBaseColors();
+            CreateMarkers();
+        }
+
+        public void AssignBaseColors()
+        {
+            MeshRenderer meshRenderer = GetComponent<MeshRenderer>();
+            Material sourceMaterial = meshRenderer != null ? meshRenderer.sharedMaterial : null;
+            Color baseColor = GetMaterialColor(sourceMaterial, Color.white);
+
+            for (int i = 0; i < samples.Count; i++)
+            {
+                samples[i].baseColor = baseColor;
+                samples[i].filteredColor = baseColor;
             }
         }
 
         private void ClearSamples()
         {
+            samples.Clear();
+
             Transform existingContainer = transform.Find(MarkerContainerName);
 
             if (existingContainer == null)
@@ -131,11 +160,20 @@ namespace SurfaceKuwahara
             return cumulativeTriangleAreas.Length - 1;
         }
 
-        private static Vector3 SamplePointOnTriangle(Vector3[] vertices, int[] triangles, int triangleIndex)
+        private SurfaceSample CreateSurfaceSample(
+            Vector3[] vertices,
+            int[] triangles,
+            Vector3[] normals,
+            Vector2[] uvs,
+            int triangleIndex)
         {
-            Vector3 a = vertices[triangles[triangleIndex * 3]];
-            Vector3 b = vertices[triangles[triangleIndex * 3 + 1]];
-            Vector3 c = vertices[triangles[triangleIndex * 3 + 2]];
+            int vertexIndexA = triangles[triangleIndex * 3];
+            int vertexIndexB = triangles[triangleIndex * 3 + 1];
+            int vertexIndexC = triangles[triangleIndex * 3 + 2];
+
+            Vector3 a = vertices[vertexIndexA];
+            Vector3 b = vertices[vertexIndexB];
+            Vector3 c = vertices[vertexIndexC];
 
             // These two random values are converted into barycentric weights.
             // Reflecting values above the diagonal keeps the distribution uniform over the full triangle.
@@ -148,7 +186,23 @@ namespace SurfaceKuwahara
                 v = 1f - v;
             }
 
-            return a + (b - a) * u + (c - a) * v;
+            float w = 1f - u - v;
+            Vector3 localPosition = a * w + b * u + c * v;
+            Vector3 localNormal = CalculateSampleNormal(vertices, triangles, normals, triangleIndex, vertexIndexA, vertexIndexB, vertexIndexC, w, u, v);
+            Vector2 uv = CalculateSampleUv(uvs, vertexIndexA, vertexIndexB, vertexIndexC, w, u, v);
+            Vector3 worldNormal = TransformNormalToWorld(localNormal);
+
+            return new SurfaceSample
+            {
+                localPosition = localPosition,
+                worldPosition = transform.TransformPoint(localPosition),
+                localNormal = localNormal,
+                worldNormal = worldNormal,
+                uv = uv,
+                baseColor = Color.white,
+                filteredColor = Color.white,
+                markerObject = null
+            };
         }
 
         private static Vector3 CalculateTriangleNormal(Vector3[] vertices, int[] triangles, int triangleIndex)
@@ -160,6 +214,51 @@ namespace SurfaceKuwahara
             return Vector3.Cross(b - a, c - a).normalized;
         }
 
+        private static Vector3 CalculateSampleNormal(
+            Vector3[] vertices,
+            int[] triangles,
+            Vector3[] normals,
+            int triangleIndex,
+            int vertexIndexA,
+            int vertexIndexB,
+            int vertexIndexC,
+            float weightA,
+            float weightB,
+            float weightC)
+        {
+            if (normals != null && normals.Length == vertices.Length)
+            {
+                Vector3 interpolatedNormal =
+                    normals[vertexIndexA] * weightA +
+                    normals[vertexIndexB] * weightB +
+                    normals[vertexIndexC] * weightC;
+
+                if (interpolatedNormal != Vector3.zero)
+                {
+                    return interpolatedNormal.normalized;
+                }
+            }
+
+            return CalculateTriangleNormal(vertices, triangles, triangleIndex);
+        }
+
+        private static Vector2 CalculateSampleUv(
+            Vector2[] uvs,
+            int vertexIndexA,
+            int vertexIndexB,
+            int vertexIndexC,
+            float weightA,
+            float weightB,
+            float weightC)
+        {
+            if (uvs != null && uvs.Length > vertexIndexA && uvs.Length > vertexIndexB && uvs.Length > vertexIndexC)
+            {
+                return uvs[vertexIndexA] * weightA + uvs[vertexIndexB] * weightB + uvs[vertexIndexC] * weightC;
+            }
+
+            return Vector2.zero;
+        }
+
         private Vector3 TransformNormalToWorld(Vector3 localNormal)
         {
             // Normals should be transformed by the inverse-transpose matrix so they stay correct
@@ -169,9 +268,21 @@ namespace SurfaceKuwahara
             return worldNormal == Vector3.zero ? transform.up : worldNormal;
         }
 
-        private void CreateMarker(Transform container, Vector3 worldPoint, Vector3 worldNormal, int index)
+        private void CreateMarkers()
         {
-            Vector3 normalizedNormal = worldNormal.normalized;
+            Transform container = CreateMarkerContainer();
+
+            // Samples are stored separately from their marker GameObjects so later filtering passes can
+            // read and update surface data without depending on temporary visualization objects.
+            for (int i = 0; i < samples.Count; i++)
+            {
+                samples[i].markerObject = CreateMarker(container, samples[i], i);
+            }
+        }
+
+        private GameObject CreateMarker(Transform container, SurfaceSample sample, int index)
+        {
+            Vector3 normalizedNormal = sample.worldNormal.normalized;
             GameObject marker = markerShape == MarkerShape.Sphere
                 ? CreateSphereMarker()
                 : CreateDiscMarker();
@@ -181,18 +292,19 @@ namespace SurfaceKuwahara
 
             if (markerShape == MarkerShape.Sphere)
             {
-                marker.transform.position = worldPoint;
+                marker.transform.position = sample.worldPosition;
                 marker.transform.localScale = Vector3.one * pointSize;
             }
             else
             {
                 // Disc meshes lie flat in local XZ, which makes local Vector3.up their face normal.
                 // Aligning local up to the sampled surface normal orients each disc tangent to the mesh.
-                marker.transform.position = worldPoint + normalizedNormal * surfaceOffset;
+                marker.transform.position = sample.worldPosition + normalizedNormal * surfaceOffset;
                 marker.transform.rotation = Quaternion.FromToRotation(Vector3.up, normalizedNormal);
             }
 
-            ApplyMarkerMaterial(marker);
+            ApplyMarkerMaterial(marker, sample.filteredColor);
+            return marker;
         }
 
         private GameObject CreateSphereMarker()
@@ -212,12 +324,75 @@ namespace SurfaceKuwahara
             return marker;
         }
 
-        private void ApplyMarkerMaterial(GameObject marker)
+        private void ApplyMarkerMaterial(GameObject marker, Color color)
         {
-            if (markerMaterial != null)
+            Renderer renderer = marker.GetComponent<Renderer>();
+
+            if (renderer == null)
             {
-                Renderer renderer = marker.GetComponent<Renderer>();
-                renderer.sharedMaterial = markerMaterial;
+                return;
+            }
+
+            Material sourceMaterial = markerMaterial != null ? markerMaterial : renderer.sharedMaterial;
+            Material coloredMaterial = CreateMarkerMaterial(sourceMaterial);
+
+            if (coloredMaterial == null)
+            {
+                return;
+            }
+
+            SetMaterialColor(coloredMaterial, color);
+            renderer.sharedMaterial = coloredMaterial;
+        }
+
+        private static Material CreateMarkerMaterial(Material sourceMaterial)
+        {
+            if (sourceMaterial != null)
+            {
+                return new Material(sourceMaterial);
+            }
+
+            Shader defaultShader = Shader.Find("Universal Render Pipeline/Lit");
+            defaultShader = defaultShader != null ? defaultShader : Shader.Find("Standard");
+
+            return defaultShader != null ? new Material(defaultShader) : null;
+        }
+
+        private static Color GetMaterialColor(Material material, Color fallback)
+        {
+            if (material == null)
+            {
+                return fallback;
+            }
+
+            if (material.HasProperty("_BaseColor"))
+            {
+                return material.GetColor("_BaseColor");
+            }
+
+            if (material.HasProperty("_Color"))
+            {
+                return material.GetColor("_Color");
+            }
+
+            return fallback;
+        }
+
+        private static void SetMaterialColor(Material material, Color color)
+        {
+            if (material == null)
+            {
+                return;
+            }
+
+            if (material.HasProperty("_BaseColor"))
+            {
+                material.SetColor("_BaseColor", color);
+            }
+
+            if (material.HasProperty("_Color"))
+            {
+                material.SetColor("_Color", color);
             }
         }
 
