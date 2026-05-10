@@ -23,11 +23,14 @@ Refactored the sampled points into structured surface sample data. Each sample s
 
 This prepares the project for neighborhood search and Kuwahara-inspired filtering.
 
-## Next Steps
 
-- Implement a spatial grid for neighbor lookup.
-- For each sample, find nearby surface samples within a radius.
+### Milestone 4: Spatial Grid Neighbor Search
+
+Implemented a CPU-based uniform 3D spatial grid for querying nearby surface samples. This allows each sampled disc to find neighboring samples within a configurable radius. The neighbor search prepares the project for the Kuwahara-inspired filtering step, where each sample will analyze nearby samples, split them into local regions, compute mean color and variance, and choose the lowest-variance region for the final spot color.
+
+## Next Steps
 - Split the local neighborhood into sectors.
 - Compute mean color and variance per sector.
 - Assign the lowest-variance sector color to the current sample.
 - Improve sampling distribution toward Poisson-disk spacing.
+
