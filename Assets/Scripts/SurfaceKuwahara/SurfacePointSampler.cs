@@ -3,6 +3,19 @@ using UnityEngine;
 
 namespace SurfaceKuwahara
 {
+    [System.Serializable]
+    public class SurfaceSample
+    {
+        public Vector3 localPosition;
+        public Vector3 worldPosition;
+        public Vector3 localNormal;
+        public Vector3 worldNormal;
+        public Vector2 uv;
+        public Color baseColor;
+        public Color filteredColor;
+        public GameObject markerObject;
+    }
+
     [RequireComponent(typeof(MeshFilter))]
     public class SurfacePointSampler : MonoBehaviour
     {
@@ -12,29 +25,19 @@ namespace SurfaceKuwahara
             Disc
         }
 
-        [System.Serializable]
-        public class SurfaceSample
-        {
-            public Vector3 localPosition;
-            public Vector3 worldPosition;
-            public Vector3 localNormal;
-            public Vector3 worldNormal;
-            public Vector2 uv;
-            public Color baseColor;
-            public Color filteredColor;
-            public GameObject markerObject;
-        }
-
         [SerializeField] private int sampleCount = 256;
         [SerializeField] private int randomSeed = 12345;
         [SerializeField] private float pointSize = 0.05f;
         [SerializeField] private float surfaceOffset = 0.001f;
+        [SerializeField] private float neighborRadius = 0.15f;
+        [SerializeField] private float spatialGridCellSize = 0.15f;
         [SerializeField] private MarkerShape markerShape = MarkerShape.Sphere;
         [SerializeField] private Material markerMaterial;
         [SerializeField] private List<SurfaceSample> samples = new List<SurfaceSample>();
 
         private const string MarkerContainerName = "Surface Point Samples";
         private const int DiscSegmentCount = 16;
+        private SpatialGrid3D spatialGrid;
 
         [ContextMenu("Regenerate Samples")]
         private void RegenerateSamples()
@@ -78,7 +81,29 @@ namespace SurfaceKuwahara
             }
 
             AssignBaseColors();
+            BuildSpatialGrid();
             CreateMarkers();
+        }
+
+        [ContextMenu("Log Neighbor Debug Info")]
+        private void LogNeighborDebugInfo()
+        {
+            if (samples == null || samples.Count == 0)
+            {
+                Debug.LogWarning("SurfacePointSampler has no samples. Run Regenerate Samples first.", this);
+                return;
+            }
+
+            BuildSpatialGrid();
+
+            List<SurfaceSample> neighbors = new List<SurfaceSample>();
+            SurfaceSample firstSample = samples[0];
+            spatialGrid.QueryRadius(firstSample.worldPosition, neighborRadius, neighbors);
+
+            Debug.Log(
+                $"SurfacePointSampler Neighbor Debug: sampleCount={samples.Count}, neighborCount={neighbors.Count}, " +
+                $"neighborRadius={neighborRadius}, spatialGridCellSize={spatialGrid.CellSize}",
+                this);
         }
 
         public void AssignBaseColors()
@@ -97,6 +122,7 @@ namespace SurfaceKuwahara
         private void ClearSamples()
         {
             samples.Clear();
+            spatialGrid?.Clear();
 
             Transform existingContainer = transform.Find(MarkerContainerName);
 
@@ -268,12 +294,31 @@ namespace SurfaceKuwahara
             return worldNormal == Vector3.zero ? transform.up : worldNormal;
         }
 
+        private void BuildSpatialGrid()
+        {
+            // The future Kuwahara-style filter needs to compare each surface sample with nearby
+            // samples. A uniform grid keeps that CPU search local by looking in nearby cells instead
+            // of scanning the full sample list for every query.
+            if (spatialGrid == null)
+            {
+                spatialGrid = new SpatialGrid3D(spatialGridCellSize);
+            }
+            else
+            {
+                spatialGrid.Initialize(spatialGridCellSize);
+            }
+
+            spatialGrid.Build(samples);
+        }
+
         private void CreateMarkers()
         {
             Transform container = CreateMarkerContainer();
 
             // Samples are stored separately from their marker GameObjects so later filtering passes can
             // read and update surface data without depending on temporary visualization objects.
+            // For this prototype, a uniform grid is simpler to inspect and tune than an octree or kd-tree,
+            // while still giving us the radius-neighborhood data the Kuwahara pass will need.
             for (int i = 0; i < samples.Count; i++)
             {
                 samples[i].markerObject = CreateMarker(container, samples[i], i);
